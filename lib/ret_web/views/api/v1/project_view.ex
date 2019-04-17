@@ -14,7 +14,8 @@ defmodule RetWeb.Api.V1.ProjectView do
       name: project.name,
       project_url: url_for_file(project.project_owned_file),
       thumbnail_url: url_for_file(project.thumbnail_owned_file),
-      remixed_from_scene_id: get_scene_sid(project.remixed_from_scene)
+      remixed_from_scene_id: get_scene_sid(project.remixed_from_scene),
+      published_scene_id: get_scene_sid(project.published_scene)
     }
   end
 

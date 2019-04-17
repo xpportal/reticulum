@@ -56,7 +56,8 @@ defmodule RetWeb.SceneControllerTest do
       "project_url" => project_url,
       "project_id" => project_id,
       "name" => name,
-      "remixed_from_scene_id" => remixed_from_scene_id
+      "remixed_from_scene_id" => remixed_from_scene_id,
+      "published_scene_id" => published_scene_id
     } = response
 
     assert name == "Test Scene"
@@ -64,6 +65,7 @@ defmodule RetWeb.SceneControllerTest do
     assert project_url != nil
     assert project_id != nil
     assert remixed_from_scene_id == scene.scene_sid
+    assert published_scene_id == nil
   end
 
   @tag :authenticated
