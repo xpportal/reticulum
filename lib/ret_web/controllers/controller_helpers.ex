@@ -13,8 +13,16 @@ defmodule RetWeb.ControllerHelpers do
   end
 
   def render_error_json(conn, status) do
+    status = convert_status(status)
     code = Plug.Conn.Status.code(status)
     reason = Plug.Conn.Status.reason_phrase(code)
     render_error_json(conn, status, reason)
+  end
+
+  defp convert_status(status) do
+    case status do
+      :not_allowed -> :unauthorized # Used in Storage
+      _ -> status
+    end
   end
 end

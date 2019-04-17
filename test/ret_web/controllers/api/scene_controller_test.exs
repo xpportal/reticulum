@@ -43,6 +43,29 @@ defmodule RetWeb.SceneControllerTest do
     assert created_scene.description == "Description"
   end
 
+  test "scene remix 401's when not logged in", %{conn: conn, scene: scene} do
+    conn |> post(api_v1_scene_remix_path(conn, :remix, scene.scene_sid)) |> response(401)
+  end
+
+  @tag :authenticated
+  test "scene remix works when logged in", %{conn: conn, scene: scene} do
+    response = conn |> post(api_v1_scene_remix_path(conn, :remix, scene.scene_sid)) |> json_response(200)
+    
+    %{
+      "thumbnail_url" => thumbnail_url,
+      "project_url" => project_url,
+      "project_id" => project_id,
+      "name" => name,
+      "remixed_from_scene_id" => remixed_from_scene_id
+    } = response
+
+    assert name == "Test Scene"
+    assert thumbnail_url != nil
+    assert project_url != nil
+    assert project_id != nil
+    assert remixed_from_scene_id == scene.scene_sid
+  end
+
   @tag :authenticated
   test "scene update works when logged in", %{conn: conn, owned_file: owned_file, scene: scene} do
     params = scene_create_or_update_params(owned_file, "New Name", "New Description")

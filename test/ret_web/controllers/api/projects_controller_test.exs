@@ -17,7 +17,7 @@ defmodule RetWeb.ProjectsControllerTest do
   end
 
   @tag :authenticated
-  test "projects index works when logged in", %{conn: conn, project: project} do
+  test "projects index works when logged in", %{conn: conn} do
     response = conn |> get(api_v1_project_path(conn, :index)) |> json_response(200)
 
     %{
@@ -59,7 +59,6 @@ defmodule RetWeb.ProjectsControllerTest do
   end
 
   test "projects create 401's when not logged in", %{conn: conn} do
-    params = %{ project: %{ name: "Test Project" } }
     conn |> post(api_v1_project_path(conn, :create)) |> response(401)
   end
 

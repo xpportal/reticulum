@@ -29,6 +29,25 @@ defmodule Ret.Crypto do
     end
   end
 
+  def copy_file(source_path, source_key, destination_path, destination_key) do
+    with {:ok, %{size: source_size}} <- File.stat(source_path) do
+      infile = File.stream!(source_path, [], @chunk_size)
+      outfile = File.stream!(destination_path, [], @chunk_size)
+
+      decrypt_state = :crypto.stream_init(:aes_ctr, :crypto.hash(:sha256, source_key), <<0::size(128)>>)
+      encrypt_state = :crypto.stream_init(:aes_ctr, :crypto.hash(:sha256, destination_key), <<0::size(128)>>)
+
+      infile
+      |> Stream.scan({0, source_size, decrypt_state, nil}, &decrypt_chunk/2)
+      |> Stream.map(fn x -> elem(x, 3) end)
+      |> Stream.scan({encrypt_state, nil}, &encrypt_chunk/2)
+      |> Stream.map(fn x -> elem(x, 1) end)
+      |> Enum.into(outfile)
+
+      :ok
+    end
+  end
+
   def encrypt(plaintext) do
     iv = :crypto.strong_rand_bytes(16)
     key = :crypto.hash(:sha256, Application.get_env(:ret, RetWeb.Endpoint)[:secret_key_base])

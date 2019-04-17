@@ -1,7 +1,7 @@
 defmodule RetWeb.Api.V1.SceneController do
   use RetWeb, :controller
 
-  alias Ret.{Account, Repo, Scene, SceneListing, Storage}
+  alias Ret.{Account, Repo, Scene, SceneListing, Project, Storage}
 
   plug(RetWeb.Plugs.RateLimit when action in [:create, :update])
 
@@ -21,6 +21,22 @@ defmodule RetWeb.Api.V1.SceneController do
 
   def create(conn, %{"scene" => params}) do
     create_or_update(conn, params)
+  end
+
+  def remix(conn, %{"scene_id" => scene_sid}) do
+    account = Guardian.Plug.current_resource(conn)
+
+    with %Scene{} = scene <- get_scene(scene_sid),
+         true <- scene.allow_remixing,
+         {:ok, project} <- Project.remix_scene(account, scene) do
+      conn
+      |> put_view(RetWeb.Api.V1.ProjectView)
+      |> render("show.json", project: project)
+    else
+      nil -> render_error_json(conn, :not_found)
+      false -> render_error_json(conn, :unauthorized)
+      {:error, error} -> render_error_json(conn, error)
+    end
   end
 
   defp get_scene(scene_sid) do

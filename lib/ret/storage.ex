@@ -44,6 +44,20 @@ defmodule Ret.Storage do
     end
   end
 
+  def duplicate(account, owned_file) do
+    dest_file_uuid = Ecto.UUID.generate()
+    dest_access_token = SecureRandom.hex()
+
+    with [_, _, src_blob_file_path] <- paths_for_uuid(owned_file.owned_file_uuid, @owned_file_path),
+         [dest_path, dest_meta_file_path, dest_blob_file_path] <- paths_for_uuid(dest_file_uuid, @expiring_file_path),
+         :ok <- File.mkdir_p(dest_path),
+         :ok <- copy_blob_file(src_blob_file_path, owned_file.key, dest_blob_file_path, dest_access_token),
+         :ok <- File.write(dest_meta_file_path, Poison.encode!(%{content_type: owned_file.content_type, content_length: owned_file.content_length, promotion_token: nil})) do
+
+      promote(dest_file_uuid, dest_access_token, nil, account)
+    end
+  end
+
   def fetch(id, key) when is_binary(id) and is_binary(key) do
     fetch_blob(id, key, @expiring_file_path)
   end
@@ -231,6 +245,10 @@ defmodule Ret.Storage do
 
   defp write_blob_file(source_path, destination_path, key) do
     Ret.Crypto.encrypt_file(source_path, destination_path, key |> Ret.Crypto.hash())
+  end
+
+  defp copy_blob_file(source_path, source_key, destination_path, destination_key) do
+    Ret.Crypto.copy_file(source_path, source_key |> Ret.Crypto.hash(), destination_path, destination_key |> Ret.Crypto.hash())
   end
 
   defp module_config(key) do

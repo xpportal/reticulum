@@ -29,6 +29,7 @@ defmodule Ret.Scene do
     belongs_to(:model_owned_file, Ret.OwnedFile, references: :owned_file_id)
     belongs_to(:screenshot_owned_file, Ret.OwnedFile, references: :owned_file_id)
     belongs_to(:scene_owned_file, Ret.OwnedFile, references: :owned_file_id)
+    belongs_to(:remixed_from_scene, Ret.Scene, references: :scene_id)
     field(:state, Scene.State)
 
     timestamps()
