@@ -86,7 +86,7 @@ defmodule RetWeb.SceneControllerTest do
     conn = conn |> Plug.Conn.put_req_header("authorization", "bearer: " <> token)
     params = scene_create_or_update_params(owned_file, "New Name", "New Description")
 
-    conn |> patch(api_v1_scene_path(conn, :update, scene.scene_sid), params) |> response(401)
+    conn |> patch(api_v1_scene_path(conn, :update, scene.scene_sid), params) |> response(404)
   end
 
   defp scene_create_or_update_params(owned_file, name \\ "Name", description \\ "Description") do

@@ -1,7 +1,7 @@
 defmodule RetWeb.Api.V1.ProjectController do
   use RetWeb, :controller
 
-  alias Ret.{Project, Repo, Storage}
+  alias Ret.{Project, Scene, Repo, Storage}
 
   # Limit to 1 TPS
   plug(RetWeb.Plugs.RateLimit when action in [:create])
@@ -26,6 +26,26 @@ defmodule RetWeb.Api.V1.ProjectController do
 
     case Project.create_project(account, params) do
       {:ok, project} -> render(conn, "show.json", project: project)
+      {:error, error} -> render_error_json(conn, error)
+    end
+  end
+
+  def publish(conn, %{"project_id" => project_sid, "scene" => params}) do
+    account = Guardian.Plug.current_resource(conn)
+
+    promotion_params = %{
+      model: {params["model_file_id"], params["model_file_token"]},
+      screenshot: {params["screenshot_file_id"], params["screenshot_file_token"]}
+    }
+
+    with %Project{} = project <- Project.project_by_sid_for_account(project_sid, account),
+         %{model: {:ok, model_owned_file}, screenshot: {:ok, screenshot_owned_file}} <- Storage.promote(promotion_params, account),
+         {:ok, scene} <- Scene.publish(account, project, model_owned_file, screenshot_owned_file, params) do
+      conn
+      |> put_view(RetWeb.Api.V1.SceneView)
+      |> render("show.json", scene: scene)
+    else
+      nil -> render_error_json(conn, :not_found)
       {:error, error} -> render_error_json(conn, error)
     end
   end

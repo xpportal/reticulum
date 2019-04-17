@@ -4,7 +4,7 @@ defmodule RetWeb.ProjectsControllerTest do
 
   alias Ret.{Project, Repo, Account}
 
-  setup [:create_account, :create_project_owned_file, :create_thumbnail_owned_file, :create_project]
+  setup [:create_account, :create_owned_file, :create_project_owned_file, :create_thumbnail_owned_file, :create_project]
 
   setup do
     on_exit(fn ->
@@ -149,5 +149,100 @@ defmodule RetWeb.ProjectsControllerTest do
     deleted_project = Project |> Repo.get_by(project_sid: project.project_sid)
 
     assert deleted_project != nil
+  end
+
+  test "projects publish 401's when not logged in", %{conn: conn, project: project} do
+    conn |> post(api_v1_project_publish_path(conn, :publish, project.project_sid)) |> response(401)
+  end
+
+  @tag :authenticated
+  test "projects publish / republish works when logged in", %{conn: conn, project: project, owned_file: owned_file} do
+    params1 =  %{
+      "scene" => %{
+        "name" => "Test Scene",
+        "description" => "Test description",
+        "model_file_id" => owned_file.owned_file_uuid,
+        "model_file_token" => owned_file.key,
+        "screenshot_file_id" => owned_file.owned_file_uuid,
+        "screenshot_file_token" => owned_file.key,
+        "allow_promotion" => true,
+        "allow_remixing" => true
+      }
+    }
+
+    # Test first publish
+    response1 = conn |> post(api_v1_project_publish_path(conn, :publish, project.project_sid, params1)) |> json_response(200)
+
+    %{
+      "scenes" => [
+        %{
+          "allow_promotion" => allow_promotion1,
+          "allow_remixing" => allow_remixing1,
+          "attribution" => attribution1,
+          "attributions" => attributions1,
+          "description" => description1,
+          "model_url" => model_url1,
+          "name" => name1,
+          "scene_id" => scene_id1,
+          "screenshot_url" => screenshot_url1,
+          "url" => url1
+        }
+      ]
+    } = response1
+
+    assert allow_promotion1 == true
+    assert allow_remixing1 == true
+    assert attribution1 == nil
+    assert attributions1 == nil
+    assert description1 == "Test description"
+    assert model_url1 != nil
+    assert name1 == "Test Scene"
+    assert scene_id1 != nil
+    assert screenshot_url1 != nil
+    assert url1 != nil
+
+    params2 =  %{
+      "scene" => %{
+        "name" => "Test Scene 2",
+        "description" => "Test description 2",
+        "model_file_id" => owned_file.owned_file_uuid,
+        "model_file_token" => owned_file.key,
+        "screenshot_file_id" => owned_file.owned_file_uuid,
+        "screenshot_file_token" => owned_file.key,
+        "allow_promotion" => false,
+        "allow_remixing" => false
+      }
+    }
+
+    # Test republish
+    response2 = conn |> post(api_v1_project_publish_path(conn, :publish, project.project_sid, params2)) |> json_response(200)
+
+    %{
+      "scenes" => [
+        %{
+          "allow_promotion" => allow_promotion2,
+          "allow_remixing" => allow_remixing2,
+          "attribution" => attribution2,
+          "attributions" => attributions2,
+          "description" => description2,
+          "model_url" => model_url2,
+          "name" => name2,
+          "scene_id" => scene_id2,
+          "screenshot_url" => screenshot_url2,
+          "url" => url2
+        }
+      ]
+    } = response2
+
+    assert allow_promotion2 == false
+    assert allow_remixing2 == false
+    assert attribution2 == nil
+    assert attributions2 == nil
+    assert description2 == "Test description 2"
+    assert model_url2 != nil
+    assert name2 == "Test Scene 2"
+    assert scene_id2 == scene_id1
+    assert screenshot_url2 != nil
+    assert url2 == url1
   end
 end

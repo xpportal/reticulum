@@ -26,20 +26,20 @@ defmodule Ret.Project do
   def project_by_sid(project_sid) do
     Project
     |> Repo.get_by(project_sid: project_sid)
-    |> Repo.preload([:remixed_from_scene, :created_by_account, :project_owned_file, :thumbnail_owned_file])
+    |> Repo.preload([:remixed_from_scene, :published_scene, :created_by_account, :project_owned_file, :thumbnail_owned_file])
   end
 
   def project_by_sid_for_account(project_sid, account) do
     from(p in Project,
       where: p.project_sid == ^project_sid and p.created_by_account_id == ^account.account_id,
-      preload: [:remixed_from_scene, :created_by_account, :project_owned_file, :thumbnail_owned_file, assets: [:asset_owned_file, :thumbnail_owned_file]])
+      preload: [:remixed_from_scene, :published_scene, :created_by_account, :project_owned_file, :thumbnail_owned_file, assets: [:asset_owned_file, :thumbnail_owned_file]])
     |> Repo.one
   end
 
   def projects_for_account(account) do
     Repo.all from p in Project,
       where: p.created_by_account_id == ^account.account_id,
-      preload: [:remixed_from_scene, :project_owned_file, :thumbnail_owned_file]
+      preload: [:remixed_from_scene, :published_scene, :project_owned_file, :thumbnail_owned_file]
   end
 
   def add_asset_to_project(project, asset) do
@@ -58,7 +58,7 @@ defmodule Ret.Project do
     with {:ok, project_owned_file} <- Storage.duplicate(account, scene.scene_owned_file),
          {:ok, thumbnail_owned_file} <- Storage.duplicate(account, scene.screenshot_owned_file),
          {:ok, project} <- %Project{} |> Project.remix_scene_changeset(account, project_owned_file, thumbnail_owned_file, scene) |> Repo.insert() do
-      {:ok, Repo.preload(project, [:remixed_from_scene, :project_owned_file, :thumbnail_owned_file])}
+      {:ok, Repo.preload(project, [:remixed_from_scene, :published_scene, :project_owned_file, :thumbnail_owned_file])}
     end
   end
 

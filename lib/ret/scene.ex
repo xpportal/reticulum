@@ -8,9 +8,10 @@ end
 
 defmodule Ret.Scene do
   use Ecto.Schema
+  import Ecto.Query
   import Ecto.Changeset
 
-  alias Ret.{Repo, Scene, SceneListing}
+  alias Ret.{Repo, Scene, SceneListing, Storage}
   alias Ret.Scene.{SceneSlug}
 
   @schema_prefix "ret0"
@@ -39,9 +40,52 @@ defmodule Ret.Scene do
     Scene |> Repo.get_by(scene_sid: sid) || SceneListing |> Repo.get_by(scene_listing_sid: sid) |> Repo.preload(:scene)
   end
 
+  def scene_by_sid_for_account(scene_sid, account) do
+    from(s in Scene,
+      where: s.scene_sid == ^scene_sid and s.account_id == ^account.account_id,
+      preload: [:account, :model_owned_file, :screenshot_owned_file, :scene_owned_file])
+    |> Repo.one
+  end
+
   def to_sid(%Scene{} = scene), do: scene.scene_sid
   def to_sid(%SceneListing{} = scene_listing), do: scene_listing.scene_listing_sid
   def to_url(%t{} = s) when t in [Scene, SceneListing], do: "#{RetWeb.Endpoint.url()}/scenes/#{s |> to_sid}/#{s.slug}"
+
+  def publish(account, project, model_owned_file, screenshot_owned_file, params) do
+    Repo.transaction(fn() ->
+      with {:ok, project_owned_file} <- Storage.duplicate(account, project.project_owned_file),
+           {:ok, scene} <- create_or_update(account, project.published_scene, model_owned_file, project_owned_file, screenshot_owned_file, params),
+           {:ok, _} <- maybe_update_published_scene(project, scene) do
+        scene
+      else
+        {:error, reason} -> Repo.rollback(reason)
+        _ -> Repo.rollback(:internal_server_error)
+      end
+    end)
+  end
+
+  def maybe_update_published_scene(project, scene) do
+    case project.published_scene do
+      %Scene{} = _ -> {:ok, project}
+      nil -> change(project) |> put_assoc(:published_scene, scene) |> Repo.update()
+    end
+  end
+
+  def create_or_update(account, nil, model_owned_file, project_owned_file, screenshot_owned_file, params) do
+    create_or_update(account, %Scene{}, model_owned_file, project_owned_file, screenshot_owned_file, params)
+  end
+
+  def create_or_update(account, scene, model_owned_file, project_owned_file, screenshot_owned_file, params) do
+    with {:ok, updated_scene} <- scene |> Repo.preload([:account]) |> Scene.changeset(account, model_owned_file, screenshot_owned_file, project_owned_file, params) |> Repo.insert_or_update() do
+      updated_scene = Repo.preload(updated_scene, [:model_owned_file, :screenshot_owned_file, :scene_owned_file])
+
+      if scene.allow_promotion do
+        Task.async(fn -> updated_scene |> Ret.Support.send_notification_of_new_scene() end)
+      end
+
+      {:ok, updated_scene}
+    end
+  end
 
   def changeset(
         %Scene{} = scene,
