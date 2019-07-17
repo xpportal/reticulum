@@ -164,9 +164,15 @@ defmodule RetWeb.HubChannel do
   def handle_in("events:end_streaming", _payload, socket), do: socket |> set_presence_flag(:streaming, false)
 
   # Captures all inbound NAF messages that result in spawned objects.
-  def handle_in("naf" = event, %{"data" => %{"isFirstSync" => true, "template" => template}} = payload, socket) do
+  def handle_in(
+        "naf" = event,
+        %{"data" => %{"isFirstSync" => true, "template" => template, "networkId" => network_id}} = payload,
+        socket
+      ) do
     account = Guardian.Phoenix.Socket.current_resource(socket)
     hub = socket |> hub_for_socket
+    secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
+    secure_template = if secure_scene_object, do: secure_scene_object.template, else: ""
 
     data = payload["data"]
 
@@ -175,9 +181,15 @@ defmodule RetWeb.HubChannel do
         template |> String.ends_with?("-avatar") ->
           data
 
+        # If we have a secure_template for this object, it's a pinned or scene object for which we want to
+        # allow ownership transfer and syncing.
+        secure_template |> String.ends_with?("-media") ->
+          if account |> can?(spawn_and_move_media(hub)),
+            do: data,
+            else: data |> sanitize_with_authorized_schemas(secure_template, socket)
+
         template |> String.ends_with?("-media") ->
-          # Media authorization is done in handle_out
-          data
+          if account |> can?(spawn_and_move_media(hub)), do: data, else: nil
 
         template |> String.ends_with?("-camera") ->
           if account |> can?(spawn_camera(hub)), do: data, else: nil
@@ -199,10 +211,7 @@ defmodule RetWeb.HubChannel do
         |> Map.put("creator", socket.assigns.session_id)
         |> Map.put("owner", socket.assigns.session_id)
 
-      payload =
-        payload
-        |> Map.put("data", data)
-        |> Map.put("sender_account_id", account.account_id)
+      payload = payload |> Map.put("data", data)
 
       socket = socket |> maybe_store_secure_scene_object(payload)
 
@@ -216,16 +225,10 @@ defmodule RetWeb.HubChannel do
 
   # Captures inbound NAF update messages
   def handle_in("naf" = event, %{"dataType" => "u"} = payload, socket) do
-    authorized_data = payload["data"] |> authorize_object_manipulation(socket)
+    authorized_data = payload["data"] |> authorize_object_manipulation(:remove, socket)
 
     if authorized_data != nil do
-      account = Guardian.Phoenix.Socket.current_resource(socket)
-
-      payload =
-        payload
-        |> Map.put("data", authorized_data)
-        |> Map.put("sender_account_id", account)
-
+      payload = payload |> Map.put("data", authorized_data)
       broadcast_from!(socket, event, payload)
     end
 
@@ -236,16 +239,11 @@ defmodule RetWeb.HubChannel do
   def handle_in("naf" = event, %{"dataType" => "um"} = payload, socket) do
     %{"data" => %{"d" => updates}} = payload
 
-    filtered_updates = updates |> Enum.map(&(&1 |> authorize_object_manipulation(socket))) |> Enum.filter(&(&1 != nil))
+    filtered_updates =
+      updates |> Enum.map(&(&1 |> authorize_object_manipulation(:update, socket))) |> Enum.filter(&(&1 != nil))
 
     if filtered_updates |> length > 0 do
-      account = Guardian.Phoenix.Socket.current_resource(socket)
-
-      payload =
-        payload
-        |> Map.put("data", payload["data"] |> Map.put("d", filtered_updates))
-        |> Map.put("sender_account_id", account.account_id)
-
+      payload = payload |> Map.put("data", payload["data"] |> Map.put("d", filtered_updates))
       broadcast_from!(socket, event, payload)
     end
 
@@ -254,7 +252,7 @@ defmodule RetWeb.HubChannel do
 
   # Captures inbound NAF removal messages
   def handle_in("naf" = event, %{"dataType" => "r"} = payload, socket) do
-    authorized_data = payload["data"] |> authorize_object_manipulation(socket)
+    authorized_data = payload["data"] |> authorize_object_manipulation(:remove, socket)
 
     if authorized_data != nil do
       payload = payload |> Map.put("data", authorized_data)
@@ -547,68 +545,10 @@ defmodule RetWeb.HubChannel do
   end
 
   def handle_out("naf" = event, payload, socket) do
-    sender_account = Account |> Ret.Repo.get(payload["sender_account_id"])
-    hub = socket |> hub_for_socket
-
-    {socket, payload, should_broadcast} =
-      case payload do
-        %{"data" => %{"isFirstSync" => true, "creator" => creator, "template" => template, "networkId" => network_id}} ->
-          secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
-          authorized = sender_account |> can?(spawn_and_move_media(hub))
-
-          socket =
-            if authorized and secure_scene_object == nil do
-              socket
-              |> assign(:secure_scene_objects, [
-                %{creator: creator, network_id: network_id, template: template} | socket.assigns.secure_scene_objects
-              ])
-            else
-              socket
-            end
-
-          {payload, sanitized} =
-            if !authorized and secure_scene_object != nil and
-                 secure_scene_object.template |> String.ends_with?("-media") do
-              payload =
-                payload
-                |> Map.put(
-                  "data",
-                  payload["data"] |> sanitize_with_authorized_schemas(secure_scene_object.template, socket)
-                )
-
-              {payload, true}
-            else
-              {payload, false}
-            end
-
-          {socket, payload, authorized or sanitized}
-
-        %{"dataType" => "um"} ->
-          %{"data" => %{"d" => updates}} = payload
-          updates = updates |> Enum.map(&(&1 |> authorize_or_sanitize_update(hub, sender_account, socket)))
-          payload = payload |> Map.put("data", payload["data"] |> Map.put("d", updates))
-          {socket, payload, true}
-
-        %{"dataType" => "u"} ->
-          {socket, payload |> authorize_or_sanitize_update(hub, sender_account, socket), true}
-
-        %{"dataType" => "r", "data" => %{"networkId" => network_id}} ->
-          socket =
-            socket
-            |> assign(
-              :secure_scene_objects,
-              socket.assigns.secure_scene_objects |> Enum.reject(&(&1.network_id == network_id))
-            )
-
-          {socket, payload, true}
-
-        _ ->
-          {socket, payload, true}
-      end
+    socket = socket |> maybe_store_secure_scene_object(payload)
 
     # Sockets can block NAF as an optimization, eg iframe embeds do not need NAF messages until user clicks load
-    if !socket.assigns.block_naf and should_broadcast do
-      payload = payload |> Map.drop(["sender_account_id"])
+    if !socket.assigns.block_naf do
       push(socket, event, payload)
     end
 
@@ -617,46 +557,27 @@ defmodule RetWeb.HubChannel do
 
   def handle_out("mute", _payload, socket), do: {:noreply, socket}
 
-  defp authorize_or_sanitize_update(payload, hub, sender_account, socket) do
-    %{"networkId" => network_id} = payload["data"]
-    secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
-    secure_template = secure_scene_object.template
-
-    if secure_template |> String.ends_with?("-media") do
-      is_creator = secure_scene_object.creator == socket.assigns.session_id
-      is_pinned = Repo.get_by(RoomObject, object_id: secure_scene_object.network_id) != nil
-
-      authorized =
-        (!is_pinned or sender_account |> can?(pin_objects(hub))) and
-          (is_creator or sender_account |> can?(spawn_and_move_media(hub)))
-
-      if authorized do
-        payload
-      else
-        payload |> Map.put("data", payload["data"] |> sanitize_with_authorized_schemas(secure_template, socket))
-      end
-    else
-      payload
-    end
-  end
-
   defp maybe_store_secure_scene_object(socket, payload) do
-    %{"data" => %{"isFirstSync" => true, "creator" => creator, "template" => template, "networkId" => network_id}} =
-      payload
+    case payload do
+      %{"data" => %{"isFirstSync" => true, "creator" => creator, "template" => template, "networkId" => network_id}} ->
+        secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
 
-    secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
+        if secure_scene_object == nil do
+          socket
+          |> assign(:secure_scene_objects, [
+            %{creator: creator, network_id: network_id, template: template} | socket.assigns.secure_scene_objects
+          ])
+        else
+          socket
+        end
 
-    if secure_scene_object == nil do
-      socket
-      |> assign(:secure_scene_objects, [
-        %{creator: creator, network_id: network_id, template: template} | socket.assigns.secure_scene_objects
-      ])
-    else
-      socket
+      _ ->
+        # This is not a first sync message, so we don't need to do anything.
+        socket
     end
   end
 
-  defp authorize_object_manipulation(%{"networkId" => network_id} = data, socket) do
+  defp authorize_object_manipulation(%{"networkId" => network_id} = data, type, socket) do
     account = Guardian.Phoenix.Socket.current_resource(socket)
     hub = socket |> hub_for_socket
 
@@ -675,8 +596,18 @@ defmodule RetWeb.HubChannel do
           if is_creator, do: data, else: nil
 
         secure_template |> String.ends_with?("-media") ->
-          # Media authorization is done in handle_out
-          data
+          is_pinned = Repo.get_by(RoomObject, object_id: network_id) != nil
+
+          authorized =
+            (!is_pinned or account |> can?(pin_objects(hub))) and
+              (is_creator or account |> can?(spawn_and_move_media(hub)))
+
+          if authorized do
+            data
+          else
+            # We need to allow for syncing and ownership transfer on media
+            if type == :update, do: data |> sanitize_with_authorized_schemas(secure_template, socket), else: nil
+          end
 
         secure_template |> String.ends_with?("-camera") ->
           if is_creator or account |> can?(spawn_camera(hub)), do: data, else: nil
@@ -728,7 +659,7 @@ defmodule RetWeb.HubChannel do
 
     data
     # Allow for ownership transfer
-    |> Map.take(["isFirstSync", "template", "networkId", "creator", "owner", "lastOwnerTime"])
+    |> Map.take(["lastOwnerTime", "networkId", "owner"])
     |> Map.put("components", components)
   end
 
