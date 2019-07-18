@@ -45,6 +45,7 @@ defmodule RetWeb.HubChannel do
     |> assign(:block_naf, false)
     # Pre-populate secure_scene_objects with all the pinned and scene objects in the room.
     |> assign(:secure_scene_objects, hub |> secure_scene_objects_for_hub())
+    |> assign(:delivered_write_key_network_ids, [])
     |> perform_join(
       hub,
       context,
@@ -165,7 +166,8 @@ defmodule RetWeb.HubChannel do
   # Captures all inbound NAF messages that result in spawned objects.
   def handle_in(
         "naf" = event,
-        %{"data" => %{"isFirstSync" => true, "template" => template, "networkId" => network_id}} = payload,
+        %{"data" => %{"isFirstSync" => true, "creator" => creator, "template" => template, "networkId" => network_id}} =
+          payload,
         socket
       ) do
     account = Guardian.Phoenix.Socket.current_resource(socket)
@@ -174,6 +176,19 @@ defmodule RetWeb.HubChannel do
     secure_template = if secure_scene_object, do: secure_scene_object.template, else: ""
 
     data = payload["data"]
+
+    # TODO, client should pass this
+    authorized_component_indices =
+      if template |> String.ends_with?("-media") do
+        [3]
+      else
+        []
+      end
+
+    component_write_key_payload = {network_id, authorized_component_indices}
+
+    component_write_key =
+      component_write_key_payload |> :erlang.term_to_binary() |> Ret.Crypto.encrypt() |> Base.encode64()
 
     authorized_broadcast =
       cond do
@@ -208,9 +223,20 @@ defmodule RetWeb.HubChannel do
         |> Map.put("creator", socket.assigns.session_id)
         |> Map.put("owner", socket.assigns.session_id)
 
-      payload = payload |> Map.put("data", data)
+      secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
 
-      socket = socket |> maybe_store_secure_scene_object(payload)
+      socket =
+        if secure_scene_object == nil do
+          socket
+          |> assign(:secure_scene_objects, [
+            %{creator: creator, network_id: network_id, template: template, write_key: component_write_key}
+            | socket.assigns.secure_scene_objects
+          ])
+        else
+          socket
+        end
+
+      payload = payload |> Map.put("data", data) |> payload_with_write_keys(socket)
 
       broadcast_from!(socket, event, payload)
 
@@ -225,7 +251,7 @@ defmodule RetWeb.HubChannel do
     authorized_data = payload["data"] |> authorize_object_manipulation(:remove, socket)
 
     if authorized_data != nil do
-      payload = payload |> Map.put("data", authorized_data)
+      payload = payload |> Map.put("data", authorized_data) |> payload_with_write_keys(socket)
       broadcast_from!(socket, event, payload)
     end
 
@@ -237,10 +263,14 @@ defmodule RetWeb.HubChannel do
     %{"data" => %{"d" => updates}} = payload
 
     filtered_updates =
-      updates |> Enum.map(&(&1 |> authorize_object_manipulation(:update, socket))) |> Enum.filter(&(&1 != nil))
+      updates
+      |> Enum.map(&(&1 |> authorize_object_manipulation(:update, socket)))
+      |> Enum.filter(&(&1 != nil))
 
     if filtered_updates |> length > 0 do
-      payload = payload |> Map.put("data", payload["data"] |> Map.put("d", filtered_updates))
+      payload =
+        payload |> Map.put("data", payload["data"] |> Map.put("d", filtered_updates)) |> payload_with_write_keys(socket)
+
       broadcast_from!(socket, event, payload)
     end
 
@@ -542,35 +572,55 @@ defmodule RetWeb.HubChannel do
   end
 
   def handle_out("naf" = event, payload, socket) do
-    socket = socket |> maybe_store_secure_scene_object(payload)
-
     # Sockets can block NAF as an optimization, eg iframe embeds do not need NAF messages until user clicks load
-    if !socket.assigns.block_naf do
-      push(socket, event, payload)
-    end
+    socket =
+      if !socket.assigns.block_naf do
+        # Send the write keys if we have yet to send one for any of the network ids in this message
+        network_ids = payload |> network_ids_for_payload
+        delivered_write_key_network_ids = socket.assigns.delivered_write_key_network_ids
+        can_skip_write_keys = Enum.all?(network_ids, fn id -> Enum.member?(delivered_write_key_network_ids, id) end)
+
+        {payload, socket} =
+          if can_skip_write_keys do
+            {payload |> Map.delete("write_keys"), socket}
+          else
+            new_delivered_network_ids = (delivered_write_key_network_ids ++ network_ids) |> Enum.uniq() |> Enum.into([])
+            socket = socket |> assign(:delivered_write_key_network_ids, new_delivered_network_ids)
+
+            {payload, socket}
+          end
+
+        push(socket, event, payload)
+        socket
+      else
+        socket
+      end
 
     {:noreply, socket}
   end
 
   def handle_out("mute", _payload, socket), do: {:noreply, socket}
 
-  defp maybe_store_secure_scene_object(socket, payload) do
-    case payload do
-      %{"data" => %{"isFirstSync" => true, "creator" => creator, "template" => template, "networkId" => network_id}} ->
-        secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
+  defp payload_with_write_keys(payload, socket),
+    do: payload |> Map.put("write_keys", write_keys_for_payload(payload, socket))
 
-        if secure_scene_object == nil do
-          socket
-          |> assign(:secure_scene_objects, [
-            %{creator: creator, network_id: network_id, template: template} | socket.assigns.secure_scene_objects
-          ])
-        else
-          socket
-        end
+  defp write_keys_for_payload(payload, socket) do
+    payload
+    |> network_ids_for_payload
+    |> Enum.map(&{&1, write_key_for_network_id(&1, socket)})
+    |> Enum.into(%{})
+  end
 
-      _ ->
-        # This is not a first sync message, so we don't need to do anything.
-        socket
+  defp network_ids_for_payload(%{"data" => %{"networkId" => network_id}}), do: [network_id]
+  defp network_ids_for_payload(%{"data" => %{"d" => updates}}), do: updates |> Enum.map(&get_in(&1, ["networkId"]))
+
+  defp write_key_for_network_id(network_id, socket) do
+    secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
+
+    if secure_scene_object do
+      secure_scene_object[:write_key]
+    else
+      nil
     end
   end
 
