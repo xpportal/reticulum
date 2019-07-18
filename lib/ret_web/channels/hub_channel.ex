@@ -45,7 +45,7 @@ defmodule RetWeb.HubChannel do
     |> assign(:block_naf, false)
     # Pre-populate secure_scene_objects with all the pinned and scene objects in the room.
     |> assign(:secure_scene_objects, hub |> secure_scene_objects_for_hub())
-    |> assign(:delivered_write_key_network_ids, [])
+    |> assign(:authorized_components, %{})
     |> perform_join(
       hub,
       context,
@@ -178,17 +178,12 @@ defmodule RetWeb.HubChannel do
     data = payload["data"]
 
     # TODO, client should pass this
-    authorized_component_indices =
+    authorized_components =
       if template |> String.ends_with?("-media") do
         [3]
       else
         []
       end
-
-    component_write_key_payload = {network_id, authorized_component_indices}
-
-    component_write_key =
-      component_write_key_payload |> :erlang.term_to_binary() |> Ret.Crypto.encrypt() |> Base.encode64()
 
     authorized_broadcast =
       cond do
@@ -229,14 +224,19 @@ defmodule RetWeb.HubChannel do
         if secure_scene_object == nil do
           socket
           |> assign(:secure_scene_objects, [
-            %{creator: creator, network_id: network_id, template: template, write_key: component_write_key}
+            %{
+              creator: creator,
+              network_id: network_id,
+              template: template,
+              authorized_components: authorized_components
+            }
             | socket.assigns.secure_scene_objects
           ])
         else
           socket
         end
 
-      payload = payload |> Map.put("data", data) |> payload_with_write_keys(socket)
+      payload = payload |> Map.put("data", data) |> payload_with_authorized_components(socket)
 
       broadcast_from!(socket, event, payload)
 
@@ -251,7 +251,7 @@ defmodule RetWeb.HubChannel do
     authorized_data = payload["data"] |> authorize_object_manipulation(:remove, socket)
 
     if authorized_data != nil do
-      payload = payload |> Map.put("data", authorized_data) |> payload_with_write_keys(socket)
+      payload = payload |> Map.put("data", authorized_data) |> payload_with_authorized_components(socket)
       broadcast_from!(socket, event, payload)
     end
 
@@ -269,7 +269,9 @@ defmodule RetWeb.HubChannel do
 
     if filtered_updates |> length > 0 do
       payload =
-        payload |> Map.put("data", payload["data"] |> Map.put("d", filtered_updates)) |> payload_with_write_keys(socket)
+        payload
+        |> Map.put("data", payload["data"] |> Map.put("d", filtered_updates))
+        |> payload_with_authorized_components(socket)
 
       broadcast_from!(socket, event, payload)
     end
@@ -575,20 +577,20 @@ defmodule RetWeb.HubChannel do
     # Sockets can block NAF as an optimization, eg iframe embeds do not need NAF messages until user clicks load
     socket =
       if !socket.assigns.block_naf do
-        # Send the write keys if we have yet to send one for any of the network ids in this message
+        # Check if this outgoing socket has not yet updated its authorized components map with the latest
+        # authorized components from here
         network_ids = payload |> network_ids_for_payload
-        delivered_write_key_network_ids = socket.assigns.delivered_write_key_network_ids
-        can_skip_write_keys = Enum.all?(network_ids, fn id -> Enum.member?(delivered_write_key_network_ids, id) end)
+        authorized_components = socket.assigns.authorized_components
 
-        {payload, socket} =
-          if can_skip_write_keys do
-            {payload |> Map.delete("write_keys"), socket}
+        socket =
+          if Enum.any?(network_ids, fn id -> !Map.has_key?(authorized_components, id) end) do
+            new_authorized_components = Map.merge(authorized_components, payload["authorized_components"])
+            socket |> assign(:authorized_components, new_authorized_components)
           else
-            new_delivered_network_ids = (delivered_write_key_network_ids ++ network_ids) |> Enum.uniq() |> Enum.into([])
-            socket = socket |> assign(:delivered_write_key_network_ids, new_delivered_network_ids)
-
-            {payload, socket}
+            socket
           end
+
+        payload = payload |> Map.delete("authorized_components")
 
         push(socket, event, payload)
         socket
@@ -601,34 +603,36 @@ defmodule RetWeb.HubChannel do
 
   def handle_out("mute", _payload, socket), do: {:noreply, socket}
 
-  defp payload_with_write_keys(payload, socket),
-    do: payload |> Map.put("write_keys", write_keys_for_payload(payload, socket))
+  defp payload_with_authorized_components(payload, socket),
+    do: payload |> Map.put("authorized_components", authorized_components_for_payload(payload, socket))
 
-  defp write_keys_for_payload(payload, socket) do
+  defp authorized_components_for_payload(payload, socket) do
     payload
     |> network_ids_for_payload
-    |> Enum.map(&{&1, write_key_for_network_id(&1, socket)})
+    |> Enum.map(&{&1, authorized_components_for_network_id(&1, socket)})
     |> Enum.into(%{})
   end
 
   defp network_ids_for_payload(%{"data" => %{"networkId" => network_id}}), do: [network_id]
   defp network_ids_for_payload(%{"data" => %{"d" => updates}}), do: updates |> Enum.map(&get_in(&1, ["networkId"]))
 
-  defp write_key_for_network_id(network_id, socket) do
+  defp authorized_components_for_network_id(network_id, socket) do
     secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
 
     if secure_scene_object do
-      secure_scene_object[:write_key]
+      secure_scene_object[:authorized_components]
     else
       nil
     end
   end
 
-  defp authorize_object_manipulation(%{"networkId" => network_id} = data, type, socket) do
+  defp authorize_object_manipulation(%{"networkId" => network_id, "components" => components} = data, type, socket) do
     account = Guardian.Phoenix.Socket.current_resource(socket)
     hub = socket |> hub_for_socket
 
     secure_scene_object = socket.assigns.secure_scene_objects |> Enum.find(&(&1.network_id == network_id))
+
+    component_indices = components |> Map.keys() |> Enum.map(&(&1 |> Integer.parse() |> elem(0)))
 
     if secure_scene_object == nil do
       # It seems we've received an object manipulation message for an object that has not received a first sync yet, 
