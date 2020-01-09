@@ -2,9 +2,8 @@ defmodule RetWeb.Api.V1.MediaController do
   use RetWeb, :controller
   use Retry
 
-  def create(conn, %{"media" => %{"url" => url}}) do
-    resolve_and_render(conn, url)
-  end
+  def create(conn, %{"media" => %{"url" => url}, "force" => force}), do: resolve_and_render(conn, url, force)
+  def create(conn, %{"media" => %{"url" => url}}), do: resolve_and_render(conn, url)
 
   def create(
         conn,
@@ -70,7 +69,7 @@ defmodule RetWeb.Api.V1.MediaController do
     end
   end
 
-  defp resolve_and_render(conn, url) do
+  defp resolve_and_render(conn, url, force \\ false) do
     ua =
       conn
       |> Plug.Conn.get_req_header("user-agent")
@@ -80,16 +79,34 @@ defmodule RetWeb.Api.V1.MediaController do
     supports_webm = ua.family != "Safari" && ua.family != "Mobile Safari"
     low_resolution = ua.os.family == "Android" || ua.os.family == "iOS"
 
-    case Cachex.fetch(:media_urls, %Ret.MediaResolverQuery{
-           url: url,
-           supports_webm: supports_webm,
-           low_resolution: low_resolution
-         }) do
-      {_status, nil} ->
+    query = %Ret.MediaResolverQuery{
+      url: url,
+      supports_webm: supports_webm,
+      low_resolution: low_resolution
+    }
+
+    # Cannot use fetch here because of force option
+    cached = Cachex.get!(:media_urls, query)
+    IO.inspect(cached)
+    IO.inspect(force)
+
+    resolved =
+      if cached && !force do
+        cached
+      else
+        IO.puts("Resolve")
+        IO.inspect(query)
+        r = Ret.MediaResolver.resolve(query, force: force)
+        Cachex.put(:media_urls, query, r)
+        r
+      end
+
+    case resolved do
+      nil ->
         conn |> send_resp(404, "")
 
-      {_status, %Ret.ResolvedMedia{} = resolved_media} ->
-        render_resolved_media(conn, resolved_media)
+      %Ret.ResolvedMedia{} ->
+        render_resolved_media(conn, resolved)
 
       _ ->
         conn |> send_resp(404, "")

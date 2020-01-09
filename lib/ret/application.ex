@@ -28,8 +28,7 @@ defmodule Ret.Application do
         [
           :media_urls,
           [
-            expiration: expiration(default: :timer.minutes(5)),
-            fallback: fallback(default: &Ret.MediaResolver.resolve/1)
+            expiration: expiration(default: :timer.minutes(5))
           ]
         ],
         id: :media_url_cache
