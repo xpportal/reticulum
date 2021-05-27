@@ -34,7 +34,26 @@ defmodule Ret.MediaResolver do
   def resolve(%MediaResolverQuery{url: url} = query) when is_binary(url) do
     uri = url |> URI.parse()
     root_host = get_root_host(uri.host)
-    resolve(query |> Map.put(:url, uri), root_host)
+    query = Map.put(query, :url, uri)
+
+    # TODO: We could end up running fallback_to_screenshot_opengraph_or_nothing
+    #       twice in a row. These resolve functions can be simplified so that we can
+    #       more easily track individual failures and only fallback when necessary.
+    #       Also make sure they have a uniform response shape for indicating an
+    #       error.
+    case resolve(query, root_host) do
+      :error ->
+        fallback_to_screenshot_opengraph_or_nothing(query)
+
+      {:error, _reason} ->
+        fallback_to_screenshot_opengraph_or_nothing(query)
+
+      {:commit, nil} ->
+        fallback_to_screenshot_opengraph_or_nothing(query)
+
+      commit ->
+        commit
+    end
   end
 
   def resolve(%MediaResolverQuery{url: %URI{host: nil}}, _root_host) do
@@ -332,7 +351,12 @@ defmodule Ret.MediaResolver do
     end)
   end
 
-  defp resolve_non_video(%MediaResolverQuery{url: %URI{host: host} = uri, version: version}, _root_host) do
+  defp resolve_non_video(%MediaResolverQuery{} = query, _root_host) do
+    fallback_to_screenshot_opengraph_or_nothing(query)
+  end
+
+  # TODO: Refactor this function
+  defp fallback_to_screenshot_opengraph_or_nothing(%MediaResolverQuery{url: %URI{host: host} = uri, version: version}) do
     photomnemonic_endpoint = module_config(:photomnemonic_endpoint)
 
     # Crawl og tags for hubs rooms + scenes
@@ -340,7 +364,7 @@ defmodule Ret.MediaResolver do
 
     case uri |> URI.to_string() |> retry_head_then_get_until_success([{"Range", "bytes=0-32768"}]) do
       :error ->
-        nil
+        :error
 
       %HTTPoison.Response{headers: headers} ->
         content_type = headers |> content_type_from_headers
@@ -376,7 +400,7 @@ defmodule Ret.MediaResolver do
 
           case Download.from(url, path: path) do
             {:ok, _path} -> {:ok, %{content_type: "image/png"}}
-            error -> {:error, error}
+            _error -> :error
           end
         end
       )
@@ -430,41 +454,56 @@ defmodule Ret.MediaResolver do
         _err -> [uri, nil]
       end
 
-    {:commit, uri |> resolved(meta)}
+    {:commit, resolved(uri, meta)}
+  end
+
+  defp get_sketchfab_model_zip_url(%{model_id: model_id, api_key: api_key}) do
+    case "https://api.sketchfab.com/v3/models/#{model_id}/download"
+         |> retry_get_until_success([{"Authorization", "Token #{api_key}"}], 15_000, 15_000) do
+      :error ->
+        {:error, "Failed to get sketchfab metadata"}
+
+      response ->
+        case response |> Map.get(:body) |> Poison.decode() do
+          {:ok, json} ->
+            {:ok, Kernel.get_in(json, ["gltf", "url"])}
+
+          _ ->
+            {:error, "Failed to get sketchfab metadata"}
+        end
+    end
+  end
+
+  def download_sketchfab_model_to_path(%{model_id: model_id, api_key: api_key, path: path}) do
+    case get_sketchfab_model_zip_url(%{model_id: model_id, api_key: api_key}) do
+      {:ok, zip_url} ->
+        Download.from(zip_url, path: path)
+        {:ok, %{content_type: "model/gltf+zip"}}
+
+      {:error, error} ->
+        {:error, error}
+
+      _ ->
+        {:error, "Failed to get sketchfab url"}
+    end
   end
 
   defp resolve_sketchfab_model(model_id, api_key, version \\ 1) do
-    cached_file_result =
-      CachedFile.fetch(
-        "sketchfab-#{model_id}-#{version}",
-        fn path ->
-          Statix.increment("ret.media_resolver.sketchfab.requests")
+    loader = fn path ->
+      Statix.increment("ret.media_resolver.sketchfab.requests")
 
-          res =
-            "https://api.sketchfab.com/v3/models/#{model_id}/download"
-            |> retry_get_until_success([{"Authorization", "Token #{api_key}"}])
+      case download_sketchfab_model_to_path(%{model_id: model_id, api_key: api_key, path: path}) do
+        {:ok, metadata} ->
+          Statix.increment("ret.media_resolver.sketchfab.ok")
+          {:ok, metadata}
 
-          case res do
-            :error ->
-              Statix.increment("ret.media_resolver.sketchfab.errors")
+        {:error, _} ->
+          Statix.increment("ret.media_resolver.sketchfab.errors")
+          :error
+      end
+    end
 
-              :error
-
-            res ->
-              Statix.increment("ret.media_resolver.sketchfab.ok")
-
-              zip_url =
-                res
-                |> Map.get(:body)
-                |> Poison.decode!()
-                |> Kernel.get_in(["gltf", "url"])
-
-              Download.from(zip_url, path: path)
-
-              {:ok, %{content_type: "model/gltf+zip"}}
-          end
-        end
-      )
+    cached_file_result = CachedFile.fetch("sketchfab-#{model_id}-#{version}", loader)
 
     case cached_file_result do
       {:ok, uri} -> [uri, %{expected_content_type: "model/gltf+zip"}]

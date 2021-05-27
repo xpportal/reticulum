@@ -86,7 +86,7 @@ defmodule Ret.MediaSearch do
         count: @page_size,
         max_face_count: @max_face_count,
         max_filesizes: "gltf:#{@max_file_size_bytes}",
-        processing_status: :succeeded,
+        # processing_status: :succeeded, # Sketchfab API seems to have a bug that rejects processing_status
         cursor: cursor,
         q: q
       )
@@ -103,7 +103,7 @@ defmodule Ret.MediaSearch do
         count: @page_size,
         max_face_count: @max_face_count,
         max_filesizes: "gltf:#{@max_file_size_bytes}",
-        processing_status: :succeeded,
+        # processing_status: :succeeded,  # Sketchfab API seems to have a bug that rejects processing_status
         sort_by:
           if q == nil || q == "" do
             "-publishedAt"
@@ -343,11 +343,15 @@ defmodule Ret.MediaSearch do
   def available?(:tenor), do: has_resolver_config?(:tenor_api_key)
   def available?(:twitch), do: has_resolver_config?(:twitch_client_id)
 
-  defp sketchfab_search(query) do
+  def sketchfab_search(query) do
     with api_key when is_binary(api_key) <- resolver_config(:sketchfab_api_key) do
       res =
-        "https://api.sketchfab.com/v3/search?#{query}"
-        |> retry_get_until_success([{"Authorization", "Token #{api_key}"}])
+        retry_get_until_success(
+          "https://api.sketchfab.com/v3/search?#{query}",
+          [{"Authorization", "Token #{api_key}"}],
+          15_000,
+          15_000
+        )
 
       case res do
         :error ->
